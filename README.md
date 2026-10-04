@@ -22,6 +22,15 @@ pip install -r requirements.txt
 python wsgi.py          # http://localhost:8000
 ```
 
+### 运行测试
+
+核心算法（`app/correlator.py`）不依赖 Flask，可直接运行回归测试
+（含“全零参数下单层对单层只计 2 个并列解”的反例与多标志层分段组合用例）：
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
 ## 功能
 
 - **数据录入**：多口钻孔的孔口高程、水平位置（剖面坐标），以及按深度排列的岩性层段
@@ -39,6 +48,10 @@ python wsgi.py          # http://localhost:8000
 - **并列解与歧义区间**：正/反 DP 表联合判定每条边是否出现在某条最优路径上，
   - 列出存在并列最优的层位及其全部候选（含“可未匹配”结局）；
   - 给出候选的**高程歧义区间**（最低–最高高程、跨度），剖面图以紫色虚线候选连线和歧义带显示；
+  - 并列解按“**匹配对集合 + 两侧未匹配层集合**”的等价关系计数：同一归属方案不会因
+    间隙操作先后顺序（先跳过参考层还是先跳过待校核层）被重复计数——段内 DP 只走规范形
+    路径（同一间隙段内参考侧间隙在待校核侧间隙之前），多标志层分段组合按同一签名去重，
+    `solution_count` 与 `solutions_listed` 口径一致；
   - 并列解计数封顶 9999，并列方案枚举最多列出前 100 条，可在结果区弹窗逐方案查看。
 - **剖面图**：SVG 绘制统一高程的钻孔柱状，连线颜色区分普通匹配 / 标志层锚点 / 歧义候选，
   未匹配层标红叉，悬停层块查看属性，可开关歧义带与相似度标注。
@@ -80,6 +93,7 @@ app/
   seed.py         内置演示数据
   routes.py       Flask 路由
   static/         index.html / style.css / app.js（原生前端，SVG 剖面）
+tests/            并列解计数口径回归测试（unittest，无需 Flask）
 wsgi.py           开发入口 & gunicorn 入口
 Dockerfile / docker-compose.yml
 ```

@@ -8,6 +8,15 @@
    相似度由岩性、粒径、含水状态、高程差、置信度加权得到。
 4. 正向表 + 反向表联合判定：哪些匹配/间隙边出现在任意一条最优路径上，
    由此给出并列解的歧义区间；并枚举最优路径（上限 100 条）。
+
+并列解的等价口径：一个“方案”由匹配对集合唯一确定（两侧未匹配层集合随
+之确定）。同一集合可对应多条 DP 路径（间隙区内“跳过参考层”与“跳过待
+校核层”的先后顺序不同），为避免顺序重复计数，DP 只走规范形路径——同
+一间隙段内参考侧间隙（GA）必须排在待校核侧间隙（GB）之前，即禁止 V 态
+后紧跟 H 态。每个匹配对集合恰对应一条规范形路径，因此计数 DP 的并列解
+数、路径枚举与最终方案列表使用同一等价关系。在 gap_open >= gap_extend
+（含全零退化情形）下，任一路径重排为规范形不会变劣，最优总分与最优匹配
+集合均不受影响。
 """
 import math
 
@@ -71,6 +80,10 @@ def _align_segment(A, B, sim, gap_open, gap_extend):
 
     状态 D：上一步为匹配；H：上一步为 A 出列（B 方向间隙，参考层未匹配）；
     V：上一步为 B 出列（A 方向间隙，待校核层未匹配）。
+
+    规范形约束：H 态不允许从 V 态转移（禁止 GB 后紧跟 GA），使同一间隙段内
+    GA 一律排在 GB 之前；每个“匹配对集合”因此只对应一条 DP 路径，计数结果
+    即为按等价类去重后的并列解数。
     """
     n, m = len(A), len(B)
     D = [[NEG] * (m + 1) for _ in range(n + 1)]
@@ -106,7 +119,7 @@ def _align_segment(A, B, sim, gap_open, gap_extend):
                 best, cnt = NEG, 0
                 best, cnt = add_count(cnt, best, H[i-1][j] - gap_extend, cH[i-1][j])
                 best, cnt = add_count(cnt, best, D[i-1][j] - gap_open, cD[i-1][j])
-                best, cnt = add_count(cnt, best, V[i-1][j] - gap_open, cV[i-1][j])
+                # 规范形：不允许 V -> H（GB 后不得紧跟 GA）
                 H[i][j], cH[i][j] = best, cnt
             if j >= 1:
                 best, cnt = NEG, 0
@@ -139,14 +152,15 @@ def _align_segment(A, B, sim, gap_open, gap_extend):
             if i < n:
                 vals_d.append(-gap_open + RH[i+1][j])
                 vals_h.append(-gap_extend + RH[i+1][j])
-                vals_v.append(-gap_open + RH[i+1][j])
+                # 规范形：V 态之后不得进入 H 态，vals_v 不加 H 方向
             if j < m:
                 vals_d.append(-gap_open + RV[i][j+1])
                 vals_h.append(-gap_open + RV[i][j+1])
                 vals_v.append(-gap_extend + RV[i][j+1])
             RD[i][j] = max(vals_d)
             RH[i][j] = max(vals_h)
-            RV[i][j] = max(vals_v)
+            # i<n 且 j==m 时 V 态无任何合法后继（H 被禁），视为不可达
+            RV[i][j] = max(vals_v) if vals_v else NEG
 
     # ---- 判定每条匹配边 (i,j) 是否在某条最优路径上 ----
     match_edges = {}                 # (i,j) -> bool
@@ -163,11 +177,10 @@ def _align_segment(A, B, sim, gap_open, gap_extend):
     gap_positions = {i: set() for i in range(1, n + 1)}
     for i in range(1, n + 1):
         for j in range(0, m + 1):
-            # 边 (i-1,j) -> (i,j)，A[i] 出列
+            # 边 (i-1,j) -> (i,j)，A[i] 出列（规范形：前驱不含 V 态）
             best = max(
                 H[i-1][j] - gap_extend,
                 D[i-1][j] - gap_open,
-                V[i-1][j] - gap_open,
             )
             if best <= NEG / 2:
                 continue
@@ -190,7 +203,6 @@ def _align_segment(A, B, sim, gap_open, gap_extend):
             cands = (
                 ("H", H[i-1][j] - gap_extend, H[i-1][j]),
                 ("D", D[i-1][j] - gap_open, D[i-1][j]),
-                ("V", V[i-1][j] - gap_open, V[i-1][j]),
             )
             best = max(c[1] for c in cands)
             nxt = next(c[0] for c in cands if abs(c[1] - best) <= EPS)
@@ -253,7 +265,6 @@ def _enum_segment_paths(seg, limit=MAX_SOLUTIONS):
             cands = (
                 ("H", H[i-1][j] - ge, H[i-1][j]),
                 ("D", D[i-1][j] - go, D[i-1][j]),
-                ("V", V[i-1][j] - go, V[i-1][j]),
             ) if i > 0 else ()
             best = max((c[1] for c in cands), default=NEG)
             if best > NEG / 2 and abs(best + RH[i][j] - total) <= 1e-5:
@@ -409,7 +420,9 @@ def correlate(ref_layers, hole_layers, anchors, weights, elev_scale,
         return pairs, unref, unhole, gap_count
 
     raw_solutions = [build_solution(steps) for steps in full_solutions]
-    # 按“匹配对集合 + 未匹配层集合”去重：间隙插入顺序不同但归属相同的方案只列一次
+    # 按“匹配对集合 + 未匹配层集合”去重：段内枚举已只产生规范形路径，
+    # 这里再按同一等价关系兜底去重，保证 solutions_listed 与 solution_count
+    # 口径一致（间隙插入顺序不同但归属相同的方案只算、只列一次）
     seen, solutions_out = set(), []
     for sol in raw_solutions:
         sig = (
