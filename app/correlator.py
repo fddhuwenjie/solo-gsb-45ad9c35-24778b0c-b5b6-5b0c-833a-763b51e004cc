@@ -8,6 +8,12 @@
    相似度由岩性、粒径、含水状态、高程差、置信度加权得到。
 4. 正向表 + 反向表联合判定：哪些匹配/间隙边出现在任意一条最优路径上，
    由此给出并列解的歧义区间；并枚举最优路径（上限 100 条）。
+
+并列解按“匹配对集合 + 两侧未匹配层集合”计数：同一间隙段内
+“参考层出列 / 待校核层出列”的先后次序不产生新方案。实现上只统计
+规范路径——间隙段内参考层出列（GA）不得跟在待校核层出列（GB）之后
+（禁止 V→H 转移），每个等价类恰好对应一条规范路径；分数 DP 仍取全部
+前驱的最优值，总分不受影响（假设 gap_open ≥ gap_extend 的常规仿射惩罚）。
 """
 import math
 
@@ -71,6 +77,10 @@ def _align_segment(A, B, sim, gap_open, gap_extend):
 
     状态 D：上一步为匹配；H：上一步为 A 出列（B 方向间隙，参考层未匹配）；
     V：上一步为 B 出列（A 方向间隙，待校核层未匹配）。
+
+    计数表 cD/cH/cV 只统计规范路径：H 的前驱不计 V（即 GA 不得紧跟 GB），
+    使并列解按“匹配对集合 + 两侧未匹配层集合”去重，H/V 出列顺序不重复计数；
+    分数表 D/H/V 仍取全部前驱的最优值，段最优总分保持不变。
     """
     n, m = len(A), len(B)
     D = [[NEG] * (m + 1) for _ in range(n + 1)]
@@ -103,10 +113,19 @@ def _align_segment(A, B, sim, gap_open, gap_extend):
                     best, cnt = add_count(cnt, best, pv + s, pc)
                 D[i][j], cD[i][j] = best, cnt
             if i >= 1:
-                best, cnt = NEG, 0
-                best, cnt = add_count(cnt, best, H[i-1][j] - gap_extend, cH[i-1][j])
-                best, cnt = add_count(cnt, best, D[i-1][j] - gap_open, cD[i-1][j])
-                best, cnt = add_count(cnt, best, V[i-1][j] - gap_open, cV[i-1][j])
+                # 分数仍取三种前驱的最优（保持段总分不变）；
+                # 计数只走规范路径：GA 不得紧跟 GB（禁止 V→H），
+                # 同一“匹配对集合 + 未匹配层集合”不会被出列顺序重复计数。
+                best = max(
+                    H[i-1][j] - gap_extend,
+                    D[i-1][j] - gap_open,
+                    V[i-1][j] - gap_open,
+                )
+                cnt = 0
+                for pv, pc in ((H[i-1][j] - gap_extend, cH[i-1][j]),
+                               (D[i-1][j] - gap_open, cD[i-1][j])):
+                    if abs(pv - best) <= EPS:
+                        cnt = min(COUNT_CAP, cnt + pc)
                 H[i][j], cH[i][j] = best, cnt
             if j >= 1:
                 best, cnt = NEG, 0
@@ -221,7 +240,11 @@ def _align_segment(A, B, sim, gap_open, gap_extend):
 
 
 def _enum_segment_paths(seg, limit=MAX_SOLUTIONS):
-    """在最优子图上 DFS 枚举段内并列最优路径（步骤为段内局部坐标，1 基）。"""
+    """在最优子图上 DFS 枚举段内并列最优的规范路径（步骤为段内局部坐标，1 基）。
+
+    与计数 DP 保持同一等价关系：禁止 V→H（GA 紧跟 GB），因此每条枚举出的
+    路径对应一个不同的“匹配对集合 + 两侧未匹配层集合”。
+    """
     A_len, B_len = seg["n"], seg["m"]
     total = seg["total"]
     sim = seg["sim"]
@@ -250,10 +273,11 @@ def _enum_segment_paths(seg, limit=MAX_SOLUTIONS):
                             if len(results) >= limit:
                                 return
         elif state == "H":
+            # 与计数 DP 同一等价关系：GA 不得紧跟 GB（禁止 V→H），
+            # 枚举只产出规范路径，间隙出列顺序不同的重复方案不再出现。
             cands = (
                 ("H", H[i-1][j] - ge, H[i-1][j]),
                 ("D", D[i-1][j] - go, D[i-1][j]),
-                ("V", V[i-1][j] - go, V[i-1][j]),
             ) if i > 0 else ()
             best = max((c[1] for c in cands), default=NEG)
             if best > NEG / 2 and abs(best + RH[i][j] - total) <= 1e-5:
@@ -336,6 +360,8 @@ def correlate(ref_layers, hole_layers, anchors, weights, elev_scale,
         anchor_sim[(ia, jb)] = sim[(ia + 1, jb + 1)]
 
     dp_total = sum(r["total"] for r in segments) + sum(anchor_sim.values())
+    # 各段计数已是“匹配对集合 + 未匹配层集合”等价类数；段间相互独立，
+    # 组合后的等价类数 = 各段计数之积（锚点对固定，不产生新方案）。
     solution_count = 1
     for r in segments:
         solution_count = min(COUNT_CAP, solution_count * r["count"])
@@ -409,7 +435,8 @@ def correlate(ref_layers, hole_layers, anchors, weights, elev_scale,
         return pairs, unref, unhole, gap_count
 
     raw_solutions = [build_solution(steps) for steps in full_solutions]
-    # 按“匹配对集合 + 未匹配层集合”去重：间隙插入顺序不同但归属相同的方案只列一次
+    # 兜底去重：按“匹配对集合 + 两侧未匹配层集合”的签名，
+    # 间隙出列顺序不同但归属相同的方案只列一次（规范路径枚举已保证不重复）。
     seen, solutions_out = set(), []
     for sol in raw_solutions:
         sig = (
